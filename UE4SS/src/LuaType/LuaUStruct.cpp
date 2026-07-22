@@ -57,7 +57,10 @@ namespace RC::LuaType
         table.add_pair("GetSuperStruct", [](const LuaMadeSimple::Lua& lua) -> int {
             const auto& lua_object = lua.get_userdata<UStruct>();
 
-            LuaType::UStruct::construct(lua, static_cast<Unreal::UClass*>(lua_object.get_remote_cpp_object()->GetSuperStruct()));
+            // remote_object may legitimately be nullptr: auto_construct_object() wraps null UObject
+            // references in a valid-looking Lua object "to enable chaining" (see LuaUObject.cpp).
+            auto* remote_object = lua_object.get_remote_cpp_object();
+            LuaType::UStruct::construct(lua, remote_object ? static_cast<Unreal::UClass*>(remote_object->GetSuperStruct()) : nullptr);
 
             return 1;
         });
@@ -76,9 +79,16 @@ namespace RC::LuaType
                 lua.call_function(1, 1);
 
                 // We explicitly specify index 2 because we duplicated the function earlier and that's located at index 1.
-                if (lua.is_bool(2) && lua.get_bool(2))
+                // NOTE: get_bool() already removes the value at the given index internally (see its
+                // implementation), so it must not be followed by a separate discard_value() call on the
+                // same index -- doing so removes an extra, unrelated stack slot (the duplicated Lua
+                // function parked at index 1), corrupting the stack for every subsequent loop iteration.
+                if (lua.is_bool(2))
                 {
-                    break;
+                    if (lua.get_bool(2))
+                    {
+                        break;
+                    }
                 }
                 else
                 {
@@ -107,9 +117,16 @@ namespace RC::LuaType
                 lua.call_function(1, 1);
 
                 // We explicitly specify index 2 because we duplicated the function earlier and that's located at index 1.
-                if (lua.is_bool(2) && lua.get_bool(2))
+                // NOTE: get_bool() already removes the value at the given index internally (see its
+                // implementation), so it must not be followed by a separate discard_value() call on the
+                // same index -- doing so removes an extra, unrelated stack slot (the duplicated Lua
+                // function parked at index 1), corrupting the stack for every subsequent loop iteration.
+                if (lua.is_bool(2))
                 {
-                    break;
+                    if (lua.get_bool(2))
+                    {
+                        break;
+                    }
                 }
                 else
                 {

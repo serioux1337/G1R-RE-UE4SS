@@ -375,13 +375,19 @@ namespace RC::LuaType
     auto construct_fname(const LuaMadeSimple::Lua& lua) -> void
     {
         const auto& lua_object = lua.get_userdata<UObject>();
-        LuaType::FName::construct(lua, lua_object.get_remote_cpp_object()->GetNamePrivate());
+        auto* remote_object = lua_object.get_remote_cpp_object();
+        // 'remote_object' can be nullptr: auto_construct_object() deliberately wraps null UObject
+        // references in a valid-looking Lua object "to enable chaining", so any field/return-value
+        // that's legitimately unset reaches here as a UObject wrapper around nullptr.
+        LuaType::FName::construct(lua, remote_object ? remote_object->GetNamePrivate() : Unreal::FName(0u, 0u));
     }
 
     auto construct_uclass(const LuaMadeSimple::Lua& lua) -> void
     {
         const auto& lua_object = lua.get_userdata<UObject>();
-        LuaType::UClass::construct(lua, lua_object.get_remote_cpp_object()->GetClassPrivate());
+        auto* remote_object = lua_object.get_remote_cpp_object();
+        // See comment in construct_fname() above: remote_object may legitimately be nullptr.
+        LuaType::UClass::construct(lua, remote_object ? remote_object->GetClassPrivate() : nullptr);
     }
 
     auto construct_xproperty(const LuaMadeSimple::Lua& lua, Unreal::FProperty* property) -> void

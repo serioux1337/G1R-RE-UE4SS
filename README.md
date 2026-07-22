@@ -1,5 +1,34 @@
 # Unreal Engine 4/5 Scripting System
 
+## This fork: fixes for AngelScript-forked UE 5.4 engines (e.g. Gothic 1 Remake)
+
+Stock UE4SS crashes or returns garbage property values on games built against an AngelScript
+fork of the UE 5.4 engine (such as Gothic 1 Remake), because a couple of core reflection classes
+(`UClass`, `UScriptStruct`) have a different memory layout than stock UE 5.4, but UE4SS's
+per-engine-version member-offset tables are hardcoded and don't know about the difference. This
+fork also removed an issue with `ForEachProperty`, `ForEachFunction`, `TArray`/`TMap`/`TSet::ForEach`,
+`UDataTable::ForEachRow` and `UEnum::ForEachName` crashing as soon as a Lua callback explicitly
+`return`s `false`.
+
+### How to build this fork
+
+The member-offset fix lives inside the `deps/first/Unreal` submodule (a separate repo, `UEPseudo`,
+so it can't be committed directly here) and has to be applied by hand after cloning:
+
+1. Clone and initialize submodules as normal:
+   ```
+   git clone --recurse-submodules <this-repo-url>
+   ```
+   (or run `git submodule update --init --recursive` after a plain clone)
+2. Copy the files from [`Unreal_overwrite/`](Unreal_overwrite) into `deps/first/Unreal/`,
+   overwriting the matching files (2 corrected member-offset files + 1 small compile fix).
+3. Build as normal, see below.
+
+Everything else (the `ForEach*` double-pop fix and a couple of null-pointer-check fixes) is
+committed directly in `UE4SS/src` and needs no extra steps.
+
+---
+
 Lua scripting system platform, C++ Modding API, SDK generator, blueprint mod loader, live property editor and other dumping utilities for UE4/5 games.
 
 ## Major features

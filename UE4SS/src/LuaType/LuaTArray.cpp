@@ -155,9 +155,16 @@ namespace RC::LuaType
                     lua.call_function(2, 1);
 
                     // We explicitly specify index 2 because we duplicated the function earlier and that's located at index 1.
-                    if (lua.is_bool(2) && lua.get_bool(2))
+                    // NOTE: get_bool() already removes the value at the given index internally, so it must
+                    // not be followed by a separate discard_value() call on the same index -- doing so
+                    // removes an extra, unrelated stack slot (the duplicated Lua function parked at index 1),
+                    // corrupting the stack for every subsequent loop iteration.
+                    if (lua.is_bool(2))
                     {
-                        break;
+                        if (lua.get_bool(2))
+                        {
+                            break;
+                        }
                     }
                     else
                     {
