@@ -17,7 +17,7 @@ so it can't be committed directly here) and has to be applied by hand after clon
 
 1. Clone and initialize submodules as normal:
    ```
-   git clone --recurse-submodules <this-repo-url>
+   git clone --recurse-submodules https://github.com/serioux1337/G1R-RE-UE4SS
    ```
    (or run `git submodule update --init --recursive` after a plain clone)
 2. Copy the files from [`Unreal_overwrite/`](Unreal_overwrite) into `deps/first/Unreal/`,
