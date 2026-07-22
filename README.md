@@ -1,6 +1,6 @@
-# Unreal Engine 4/5 Scripting System
+# UE4SS fork for Gothic 1 Remake - AngelScript-forked UE 5.4 engines
 
-## This fork: fixes for AngelScript-forked UE 5.4 engines (e.g. Gothic 1 Remake)
+## Description
 
 Stock UE4SS crashes or returns garbage property values on games built against an AngelScript
 fork of the UE 5.4 engine (such as Gothic 1 Remake), because a couple of core reflection classes
@@ -23,9 +23,6 @@ so it can't be committed directly here) and has to be applied by hand after clon
 2. Copy the files from [`Unreal_overwrite/`](Unreal_overwrite) into `deps/first/Unreal/`,
    overwriting the matching files (2 corrected member-offset files + 1 small compile fix).
 3. Build as normal, see below.
-
-Everything else (the `ForEach*` double-pop fix and a couple of null-pointer-check fixes) is
-committed directly in `UE4SS/src` and needs no extra steps.
 
 ---
 
