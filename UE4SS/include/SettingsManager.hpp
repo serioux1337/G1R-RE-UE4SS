@@ -74,14 +74,21 @@ namespace RC
             bool MakeAllConfigsEngineConfig{};
         } UHTHeaderGenerator;
 
+        struct SDKGenerator
+        {
+            StringType OutputPath{};
+        } SDKGenerator;
+
         struct SectionDebug
         {
             bool SimpleConsoleEnabled{true};
             bool DebugConsoleEnabled{true};
             bool DebugConsoleVisible{true};
             float DebugGUIFontScaling{1.0};
+            bool DebugGUIUseMonospace{false};
             GUI::GfxBackend GraphicsAPI{GUI::GfxBackend::GLFW3_OpenGL3};
             GUI::RenderMode RenderMode{GUI::RenderMode::ExternalThread};
+            Input::Key ToggleGUIKey{Input::Key::O};
         } Debug;
 
         struct SectionCrashDump
