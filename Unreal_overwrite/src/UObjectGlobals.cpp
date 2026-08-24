@@ -13,6 +13,9 @@
 #include <Unreal/ClassListener.hpp>
 #include <DynamicOutput/DynamicOutput.hpp>
 
+#include <vector>
+#include <excpt.h>
+
 namespace RC::Unreal::UObjectGlobals
 {
     RC_UE_API Function<UObject*(StaticConstructObject_Internal_Params_Base)> GlobalState::StaticConstructObjectInternalBase{};
@@ -729,6 +732,39 @@ namespace RC::Unreal::UObjectGlobals
         GUOBJECTARRAY_PROFILE_ITER_END()
     }
 
+    struct ForEachUObject_SnapshotEntry
+    {
+        FUObjectItem* Item;
+        int32_t ChunkIndex;
+        int32_t ItemIndex;
+    };
+
+    // Temporary safety net until off-thread UObject access is either made properly thread-safe or
+    // mods just stop doing it: a genuinely dangling class/superclass pointer can't be detected in
+    // advance (IsUnreachable() itself needs to read the target to find its slot), so catch the
+    // fault instead and skip that one candidate.
+    static constexpr uint32_t k_ExceptionAccessViolation = 0xC0000005;
+
+    static auto ForEachUObject_TryProcessCandidate(
+            const ForEachUObjectCallback& Callable, UObject* Object, int32_t ChunkIndex, int32_t ItemIndex, LoopAction& OutAction) -> bool
+    {
+        __try
+        {
+            const auto ObjectClass = Object->GetClassPrivate();
+            if (!ObjectClass || ObjectClass->IsUnreachable()) { return false; }
+
+            OutAction = Callable(Object, ChunkIndex, ItemIndex);
+            return true;
+        }
+        __except (GetExceptionCode() == k_ExceptionAccessViolation ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        {
+            return false;
+        }
+    }
+
+    // Safe from any thread: the snapshot below is taken under ObjObjectsCritical, the same lock
+    // GC's destroy pass and allocation already use, so it never sees a torn array. FUObjectItem
+    // slots are permanent once a chunk exists, so re-checking one after unlocking is a plain read.
     static auto ForEachUObject_Chunked(const ForEachUObjectCallback& Callable) -> void
     {
         GUOBJECTARRAY_PROFILE_ITER_BEGIN()
@@ -737,32 +773,80 @@ namespace RC::Unreal::UObjectGlobals
             return;
         }
 
-        LoopAction Action{};
-
-        const auto& ObjObjects = GUObjectArray->GetObjObjects();
-        const auto NumChunks = ObjObjects.GetNumChunks();
-        const auto NumElements = ObjObjects.GetNumElements();
         static const auto ItemSize = FUObjectItem::UEP_TotalSize();
 
-        for (int32_t ChunkIndex = 0; ChunkIndex < NumChunks; ++ChunkIndex)
+        // Nothing can race a single thread's own execution, so the game thread skips the
+        // lock/snapshot/SEH machinery below entirely -- it's only needed off-thread.
+        if (!IsGameThreadInitialized() || IsInGameThreadRaw())
         {
-            // Clamp to NumElements -- don't walk past the populated region of the newest chunk.
-            const int32_t ChunkStartElement = ChunkIndex * TUObjectArray::NumElementsPerChunk;
-            if (ChunkStartElement >= NumElements) { break; }
-            const int32_t ElementsRemaining = NumElements - ChunkStartElement;
-            const int32_t ItemsInThisChunk =
-                    ElementsRemaining < TUObjectArray::NumElementsPerChunk ? ElementsRemaining : TUObjectArray::NumElementsPerChunk;
+            LoopAction Action{};
+            const auto& ObjObjects = GUObjectArray->GetObjObjects();
+            const auto NumChunks = ObjObjects.GetNumChunks();
+            const auto NumElements = ObjObjects.GetNumElements();
+            const auto& ChunksPtr = ObjObjects.GetObjects();
 
-            for (int32_t ItemIndex = 0; ItemIndex < ItemsInThisChunk; ++ItemIndex)
+            for (int32_t ChunkIndex = 0; ChunkIndex < NumChunks; ++ChunkIndex)
             {
-                const auto& ChunksPtr = ObjObjects.GetObjects();
-                const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunksPtr[ChunkIndex])[ItemIndex * ItemSize]);
-                const auto Object = ObjectItem->GetUObject();
-                if (ObjectItem->IsUnreachable() || !Object) { continue; }
-                GUOBJECTARRAY_PROFILE_ITER_COUNT()
-                Action = Callable(Object, ChunkIndex, ItemIndex);
+                // Clamp to NumElements -- don't walk past the populated region of the newest chunk.
+                const int32_t ChunkStartElement = ChunkIndex * TUObjectArray::NumElementsPerChunk;
+                if (ChunkStartElement >= NumElements) { break; }
+                const int32_t ElementsRemaining = NumElements - ChunkStartElement;
+                const int32_t ItemsInThisChunk =
+                        ElementsRemaining < TUObjectArray::NumElementsPerChunk ? ElementsRemaining : TUObjectArray::NumElementsPerChunk;
+
+                for (int32_t ItemIndex = 0; ItemIndex < ItemsInThisChunk; ++ItemIndex)
+                {
+                    const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunksPtr[ChunkIndex])[ItemIndex * ItemSize]);
+                    const auto Object = ObjectItem->GetUObject();
+                    if (ObjectItem->IsUnreachable() || !Object) { continue; }
+                    GUOBJECTARRAY_PROFILE_ITER_COUNT()
+                    Action = Callable(Object, ChunkIndex, ItemIndex);
+                    if (Action == LoopAction::Break) { break; }
+                }
                 if (Action == LoopAction::Break) { break; }
             }
+            GUOBJECTARRAY_PROFILE_ITER_END()
+            return;
+        }
+
+        std::vector<ForEachUObject_SnapshotEntry> Snapshot;
+        GUObjectArray->LockGUObjectArray();
+        {
+            const auto& ObjObjects = GUObjectArray->GetObjObjects();
+            const auto NumChunks = ObjObjects.GetNumChunks();
+            const auto NumElements = ObjObjects.GetNumElements();
+            const auto& ChunksPtr = ObjObjects.GetObjects();
+            Snapshot.reserve(NumElements);
+
+            for (int32_t ChunkIndex = 0; ChunkIndex < NumChunks; ++ChunkIndex)
+            {
+                // Clamp to NumElements -- don't walk past the populated region of the newest chunk.
+                const int32_t ChunkStartElement = ChunkIndex * TUObjectArray::NumElementsPerChunk;
+                if (ChunkStartElement >= NumElements) { break; }
+                const int32_t ElementsRemaining = NumElements - ChunkStartElement;
+                const int32_t ItemsInThisChunk =
+                        ElementsRemaining < TUObjectArray::NumElementsPerChunk ? ElementsRemaining : TUObjectArray::NumElementsPerChunk;
+
+                for (int32_t ItemIndex = 0; ItemIndex < ItemsInThisChunk; ++ItemIndex)
+                {
+                    const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunksPtr[ChunkIndex])[ItemIndex * ItemSize]);
+                    Snapshot.emplace_back(ObjectItem, ChunkIndex, ItemIndex);
+                }
+            }
+        }
+        GUObjectArray->UnlockGUObjectArray();
+
+        LoopAction Action{};
+        for (const auto& Entry : Snapshot)
+        {
+            const auto Object = Entry.Item->GetUObject();
+            if (Entry.Item->IsUnreachable() || !Object) { continue; }
+
+            LoopAction CandidateAction{LoopAction::Continue};
+            if (!ForEachUObject_TryProcessCandidate(Callable, Object, Entry.ChunkIndex, Entry.ItemIndex, CandidateAction)) { continue; }
+
+            GUOBJECTARRAY_PROFILE_ITER_COUNT()
+            Action = CandidateAction;
             if (Action == LoopAction::Break) { break; }
         }
         GUOBJECTARRAY_PROFILE_ITER_END()
@@ -837,28 +921,31 @@ namespace RC::Unreal::UObjectGlobals
 
     auto ForEachUObject(const ForEachUObjectCallback& Callable) -> void
     {
-        // GUObjectArray isn't safe to read off the game thread (only the write side is
-        // synchronized); fail fast instead of racing, same convention as LoadAsset in LuaMod.cpp.
-        if (IsGameThreadInitialized() && !IsInGameThreadRaw())
-        {
-            throw std::runtime_error{"ForEachUObject (and FindFirstOf/FindAllOf, which use it) can only be called from the game thread -- "
-                                      "GUObjectArray is not safe to read from any other thread. Use ExecuteInGameThread or "
-                                      "LoopInGameThreadWithDelay to marshal onto the game thread first."};
-        }
-
         // TODO: Expose whether FUObjectArray is chunked in ini.
         //       This is just in case there's a game with custom changes where they pulled the chunked array into a non-chunked UE version.
-        if (Version::IsAtMost(4, 7))
+        if (Version::IsAtMost(4, 19))
         {
-            ForEachUObject_TArray(Callable);
-        }
-        else if (Version::IsAtMost(4, 10))
-        {
-            ForEachUObject_IndirectArray(Callable);
-        }
-        else if (Version::IsAtMost(4, 19))
-        {
-            ForEachUObject_NonChunked(Callable);
+            // Only ForEachUObject_Chunked (4.20+) is made safe off-thread; these older array
+            // shapes still read live, unsynchronized memory, so keep failing fast.
+            if (IsGameThreadInitialized() && !IsInGameThreadRaw())
+            {
+                throw std::runtime_error{"ForEachUObject (and FindFirstOf/FindAllOf, which use it) can only be called from the game thread on "
+                                          "this engine version -- GUObjectArray is not safe to read from any other thread. Use ExecuteInGameThread "
+                                          "or LoopInGameThreadWithDelay to marshal onto the game thread first."};
+            }
+
+            if (Version::IsAtMost(4, 7))
+            {
+                ForEachUObject_TArray(Callable);
+            }
+            else if (Version::IsAtMost(4, 10))
+            {
+                ForEachUObject_IndirectArray(Callable);
+            }
+            else
+            {
+                ForEachUObject_NonChunked(Callable);
+            }
         }
         else
         {
