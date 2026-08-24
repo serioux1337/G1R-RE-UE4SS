@@ -10,6 +10,8 @@ fork also removed an issue with `ForEachProperty`, `ForEachFunction`, `TArray`/`
 `UDataTable::ForEachRow` and `UEnum::ForEachName` crashing as soon as a Lua callback explicitly
 `return`s `false`.
 
+This fork also fixes a couple of `ForEachUObject` crashes (unbounded array walk, and unsafe use off the game thread) that could crash `FindFirstOf`/`FindAllOf`.
+
 ### How to build this fork
 
 The member-offset fix lives inside the `deps/first/Unreal` submodule (a separate repo, `UEPseudo`,
@@ -21,7 +23,7 @@ so it can't be committed directly here) and has to be applied by hand after clon
    ```
    (or run `git submodule update --init --recursive` after a plain clone)
 2. Copy the files from [`Unreal_overwrite/`](Unreal_overwrite) into `deps/first/Unreal/`,
-   overwriting the matching files (2 corrected member-offset files + 1 small compile fix).
+   overwriting the matching files (various fixes, see above).
 3. Build as normal, see below.
 
 ---
