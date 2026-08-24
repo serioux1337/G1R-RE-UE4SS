@@ -745,16 +745,12 @@ namespace RC::Unreal::UObjectGlobals
     // fault instead and skip that one candidate.
     static constexpr uint32_t k_ExceptionAccessViolation = 0xC0000005;
 
-    static auto ForEachUObject_TryProcessCandidate(
-            const ForEachUObjectCallback& Callable, UObject* Object, int32_t ChunkIndex, int32_t ItemIndex, LoopAction& OutAction) -> bool
+    static auto ForEachUObject_IsObjectClassAlive(UObject* Object) -> bool
     {
         __try
         {
             const auto ObjectClass = Object->GetClassPrivate();
-            if (!ObjectClass || ObjectClass->IsUnreachable()) { return false; }
-
-            OutAction = Callable(Object, ChunkIndex, ItemIndex);
-            return true;
+            return ObjectClass && !ObjectClass->IsUnreachable();
         }
         __except (GetExceptionCode() == k_ExceptionAccessViolation ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
         {
@@ -841,12 +837,10 @@ namespace RC::Unreal::UObjectGlobals
         {
             const auto Object = Entry.Item->GetUObject();
             if (Entry.Item->IsUnreachable() || !Object) { continue; }
-
-            LoopAction CandidateAction{LoopAction::Continue};
-            if (!ForEachUObject_TryProcessCandidate(Callable, Object, Entry.ChunkIndex, Entry.ItemIndex, CandidateAction)) { continue; }
+            if (!ForEachUObject_IsObjectClassAlive(Object)) { continue; }
 
             GUOBJECTARRAY_PROFILE_ITER_COUNT()
-            Action = CandidateAction;
+            Action = Callable(Object, Entry.ChunkIndex, Entry.ItemIndex);
             if (Action == LoopAction::Break) { break; }
         }
         GUOBJECTARRAY_PROFILE_ITER_END()
