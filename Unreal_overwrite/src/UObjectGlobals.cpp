@@ -15,20 +15,40 @@
 
 namespace RC::Unreal::UObjectGlobals
 {
-    RC_UE_API Function<UObject*(StaticConstructObject_Internal_Params_Deprecated)> GlobalState::StaticConstructObjectInternalDeprecated{};
-    RC_UE_API Function<UObject*(const FStaticConstructObjectParameters&)> GlobalState::StaticConstructObjectInternal{};
+    RC_UE_API Function<UObject*(StaticConstructObject_Internal_Params_Base)> GlobalState::StaticConstructObjectInternalBase{};
+    RC_UE_API Function<UObject*(StaticConstructObject_Internal_Params_411)> GlobalState::StaticConstructObjectInternal411{};
+    RC_UE_API Function<UObject*(const FStaticConstructObjectParameters&)> GlobalState::StaticConstructObjectInternal426{};
 
     auto SetupStaticConstructObjectInternalAddress(void* FunctionAddress) -> void
     {
-        GlobalState::StaticConstructObjectInternal.assign_address(FunctionAddress);
-        GlobalState::StaticConstructObjectInternalDeprecated.assign_address(FunctionAddress);
+        GlobalState::StaticConstructObjectInternal426.assign_address(FunctionAddress);
+        GlobalState::StaticConstructObjectInternal411.assign_address(FunctionAddress);
+        GlobalState::StaticConstructObjectInternalBase.assign_address(FunctionAddress);
+    }
+
+    namespace Below411
+    {
+        static auto StaticConstructObject(const FStaticConstructObjectParameters& Params) -> UObject*
+        {
+            // Pre-4.11: No EInternalObjectFlags, no bAssumeTemplateIsArchetype, no ExternalPackage
+            return GlobalState::StaticConstructObjectInternalBase(
+                    const_cast<UClass*>(Params.Class),
+                    Params.Outer,
+                    Params.Name,
+                    Params.SetFlags,
+                    Params.Template,
+                    Params.bCopyTransientsFromClassDefaults,
+                    Params.InstanceGraph
+            );
+        }
     }
 
     namespace Below426
     {
         static auto StaticConstructObject(const FStaticConstructObjectParameters& Params) -> UObject*
         {
-            return GlobalState::StaticConstructObjectInternalDeprecated(
+            // 4.11-4.25: Has EInternalObjectFlags, bAssumeTemplateIsArchetype, ExternalPackage
+            return GlobalState::StaticConstructObjectInternal411(
                     Params.Class,
                     Params.Outer,
                     Params.Name,
@@ -47,7 +67,7 @@ namespace RC::Unreal::UObjectGlobals
         static auto StaticConstructObject(const FStaticConstructObjectParameters& Params) -> UObject*
         {
             static Function<UObject*(const FStaticConstructObjectParameters&)> StaticConstructObjectInternal = [&]() {
-                return GlobalState::StaticConstructObjectInternal.get_function_address();
+                return GlobalState::StaticConstructObjectInternal426.get_function_address();
             }();
 
             if (!StaticConstructObjectInternal.is_ready()) { return nullptr; }
@@ -61,7 +81,7 @@ namespace RC::Unreal::UObjectGlobals
         static auto StaticConstructObject(const FStaticConstructObjectParameters& Params) -> UObject*
         {
             static Function<UObject*(const FStaticConstructObjectParameters&)> StaticConstructObjectInternal = [&]() {
-                return GlobalState::StaticConstructObjectInternal.get_function_address();
+                return GlobalState::StaticConstructObjectInternal426.get_function_address();
             }();
 
             if (!StaticConstructObjectInternal.is_ready()) { return nullptr; }
@@ -73,7 +93,11 @@ namespace RC::Unreal::UObjectGlobals
 
     auto StaticConstructObject(const FStaticConstructObjectParameters& GenericParams) -> UObject*
     {
-        if (Version::IsBelow(4, 26))
+        if (Version::IsBelow(4, 11))
+        {
+            return Below411::StaticConstructObject(GenericParams);
+        }
+        else if (Version::IsBelow(4, 26))
         {
             return Below426::StaticConstructObject(GenericParams);
         }
@@ -278,7 +302,7 @@ namespace RC::Unreal::UObjectGlobals
         bool bQuickSearch = Searcher.IsFast();
 
         Searcher.ForEach([&](UObject* Object) {
-            if (bExactClass && Class != Object->GetClassPrivate()) { return LoopAction::Continue; }
+            if (Class && bExactClass && Class != Object->GetClassPrivate()) { return LoopAction::Continue; }
 
             // If this is a quick search, then the object is guaranteed to be of the specified class.
             // Otherwise, we're searching the entirety of GUObjectArray, and we need to check that the class matches.
@@ -570,6 +594,115 @@ namespace RC::Unreal::UObjectGlobals
 
     using ForEachUObjectCallback = std::function<LoopAction(UObject*, int32, int32)>;
 
+    static auto ForEachUObject_IndirectArray(const ForEachUObjectCallback& Callable) -> void
+    {
+        GUOBJECTARRAY_PROFILE_ITER_BEGIN()
+        if (!GUObjectArray)
+        {
+            return;
+        }
+
+        LoopAction Action{};
+
+        const auto& ObjObjects = GUObjectArray->GetObjObjects();
+        const auto& Chunks = ObjObjects.GetChunks();
+        const auto NumChunks = ObjObjects.GetNumChunks();
+        const auto NumElements = ObjObjects.GetNumElements();
+
+        for (int32_t ItemIndex = 0; ItemIndex < TUObjectArray::MaxTotalElements_Indirect; ++ItemIndex)
+        {
+            if (ItemIndex > NumElements) { break; }
+            const int32 ChunkIndex = ItemIndex / TUObjectArray::NumElementsPerChunk_Indirect;
+            if (ChunkIndex >= NumChunks) { break; }
+            const int32 WithinChunkIndex = ItemIndex % TUObjectArray::NumElementsPerChunk_Indirect;
+            const auto ChunkPtr = Chunks[ChunkIndex];
+            const auto Object = *(ChunkPtr + WithinChunkIndex);
+            if (!Object) { continue; }
+            GUOBJECTARRAY_PROFILE_ITER_COUNT()
+            Action = Callable(static_cast<UObject*>(Object), ChunkIndex, ItemIndex);
+            if (Action == LoopAction::Break) { break; }
+        }
+        GUOBJECTARRAY_PROFILE_ITER_END()
+    }
+
+    // 4.7 and earlier: ObjObjects is a plain TArray<UObjectBase*>. The 'Objects' offset resolves
+    // to the allocator's data pointer, giving a contiguous array of UObjectBase* slots.
+    static auto ForEachUObject_TArray(const ForEachUObjectCallback& Callable) -> void
+    {
+        GUOBJECTARRAY_PROFILE_ITER_BEGIN()
+        if (!GUObjectArray)
+        {
+            return;
+        }
+
+        LoopAction Action{};
+
+        const auto& ObjObjects = GUObjectArray->GetObjObjects();
+        const auto Slots = std::bit_cast<UObjectBase**>(ObjObjects.GetObjects());
+        const auto NumElements = ObjObjects.GetNumElements();
+
+        for (int32_t ItemIndex = 0; ItemIndex < NumElements; ++ItemIndex)
+        {
+            const auto Object = Slots[ItemIndex];
+            if (!Object) { continue; }
+            GUOBJECTARRAY_PROFILE_ITER_COUNT()
+            Action = Callable(static_cast<UObject*>(Object), 0, ItemIndex);
+            if (Action == LoopAction::Break) { break; }
+        }
+        GUOBJECTARRAY_PROFILE_ITER_END()
+    }
+
+    static auto ForEachUObject_TArrayInRange(int32_t Start, int32_t End, const ForEachUObjectCallback& Callable) -> void
+    {
+        if (!GUObjectArray)
+        {
+            return;
+        }
+
+        LoopAction Action{};
+
+        const auto& ObjObjects = GUObjectArray->GetObjObjects();
+        const auto Slots = std::bit_cast<UObjectBase**>(ObjObjects.GetObjects());
+        const auto NumElements = ObjObjects.GetNumElements();
+        const int32_t EndItemIndex = End < NumElements ? End : NumElements;
+
+        for (int32_t ItemIndex = Start; ItemIndex < EndItemIndex; ++ItemIndex)
+        {
+            const auto Object = Slots[ItemIndex];
+            if (!Object) { continue; }
+            Action = Callable(static_cast<UObject*>(Object), 0, ItemIndex);
+            if (Action == LoopAction::Break) { break; }
+        }
+    }
+
+    static auto ForEachUObject_IndirectArrayInRange(int32_t Start, int32_t End, const ForEachUObjectCallback& Callable) -> void
+    {
+        if (!GUObjectArray)
+        {
+            return;
+        }
+
+        LoopAction Action{};
+
+        const auto& ObjObjects = GUObjectArray->GetObjObjects();
+        const auto& Chunks = ObjObjects.GetChunks();
+        const auto NumChunks = ObjObjects.GetNumChunks();
+        const auto NumElements = ObjObjects.GetNumElements();
+        const int32_t EndItemIndex = End < NumElements ? End : NumElements;
+
+        for (int32_t ItemIndex = Start; ItemIndex < EndItemIndex; ++ItemIndex)
+        {
+            const int32 ChunkIndex = ItemIndex / TUObjectArray::NumElementsPerChunk_Indirect;
+            if (ChunkIndex >= NumChunks) { break; }
+            const int32 WithinChunkIndex = ItemIndex % TUObjectArray::NumElementsPerChunk_Indirect;
+            const auto ChunkPtr = Chunks[ChunkIndex];
+            const auto Object = *(ChunkPtr + WithinChunkIndex);
+            if (!Object) { continue; }
+            Action = Callable(static_cast<UObject*>(Object), ChunkIndex, ItemIndex);
+            if (Action == LoopAction::Break) { break; }
+        }
+    }
+
     static auto ForEachUObject_NonChunked(const ForEachUObjectCallback& Callable) -> void
     {
         GUOBJECTARRAY_PROFILE_ITER_BEGIN()
@@ -715,7 +848,15 @@ namespace RC::Unreal::UObjectGlobals
 
         // TODO: Expose whether FUObjectArray is chunked in ini.
         //       This is just in case there's a game with custom changes where they pulled the chunked array into a non-chunked UE version.
-        if (Version::IsAtMost(4, 19))
+        if (Version::IsAtMost(4, 7))
+        {
+            ForEachUObject_TArray(Callable);
+        }
+        else if (Version::IsAtMost(4, 10))
+        {
+            ForEachUObject_IndirectArray(Callable);
+        }
+        else if (Version::IsAtMost(4, 19))
         {
             ForEachUObject_NonChunked(Callable);
         }
@@ -727,7 +868,23 @@ namespace RC::Unreal::UObjectGlobals
 
     auto ForEachUObjectInChunk(int32_t ChunkIndex, const std::function<LoopAction(UObject*, int32)>& Callable) -> void
     {
-        if (Version::IsAtMost(4, 19))
+        if (Version::IsAtMost(4, 7))
+        {
+            // Chunkless era: the whole TArray acts as chunk 0
+            ForEachUObject_TArray([&](UObject* Object, int32_t, int32_t ObjectIndex) {
+                return Callable(Object, ObjectIndex);
+            });
+        }
+        else if (Version::IsAtMost(4, 10))
+        {
+            // Indirect array: iterate the requested chunk of UObjectBase* slots
+            ForEachUObject_IndirectArrayInRange(ChunkIndex * TUObjectArray::NumElementsPerChunk_Indirect,
+                                                (ChunkIndex + 1) * TUObjectArray::NumElementsPerChunk_Indirect,
+                                                [&](UObject* Object, int32_t, int32_t ObjectIndex) {
+                                                    return Callable(Object, ObjectIndex);
+                                                });
+        }
+        else if (Version::IsAtMost(4, 19))
         {
             ForEachUObject_NonChunked([&](UObject* Object, int32_t, int32_t ObjectIndex) {
                 return Callable(Object, ObjectIndex);
@@ -759,7 +916,15 @@ namespace RC::Unreal::UObjectGlobals
 
     auto ForEachUObjectInRange(int32_t Start, int32_t End, const std::function<LoopAction(UObject*, int32, int32)>& Callable) -> void
     {
-        if (Version::IsAtMost(4, 19))
+        if (Version::IsAtMost(4, 7))
+        {
+            ForEachUObject_TArrayInRange(Start, End, Callable);
+        }
+        else if (Version::IsAtMost(4, 10))
+        {
+            ForEachUObject_IndirectArrayInRange(Start, End, Callable);
+        }
+        else if (Version::IsAtMost(4, 19))
         {
             ForEachUObject_NonChunkedInRange(Start, End, Callable);
         }

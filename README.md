@@ -12,6 +12,8 @@ fork also removed an issue with `ForEachProperty`, `ForEachFunction`, `TArray`/`
 
 This fork also fixes a couple of `ForEachUObject` crashes (unbounded array walk, and unsafe use off the game thread) that could crash `FindFirstOf`/`FindAllOf`.
 
+This fork also guards `FString::operator=` against copying a corrupt `TArray<TCHAR>` (e.g. a bad `SoftObjectProperty` value), which could otherwise crash `FSoftObjectPath` copies.
+
 ### How to build this fork
 
 The member-offset fix lives inside the `deps/first/Unreal` submodule (a separate repo, `UEPseudo`,
