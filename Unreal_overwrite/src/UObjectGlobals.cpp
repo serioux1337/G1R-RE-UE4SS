@@ -758,9 +758,79 @@ namespace RC::Unreal::UObjectGlobals
         }
     }
 
-    // Safe from any thread: the snapshot below is taken under ObjObjectsCritical, the same lock
-    // GC's destroy pass and allocation already use, so it never sees a torn array. FUObjectItem
-    // slots are permanent once a chunk exists, so re-checking one after unlocking is a plain read.
+    // Off-thread ForEachUObject is inherently not thread-safe; this only narrows the crash
+    // window, it doesn't close it. Split in two because MSVC disallows __try in a function that
+    // also needs C++ unwind info (std::vector calls, static-local init).
+    static auto ForEachUObject_TryGetChunkTableInfo(int32_t& OutNumChunks, int32_t& OutNumElements, FUObjectItem**& OutChunksPtr) -> bool
+    {
+        __try
+        {
+            auto& ObjObjects = GUObjectArray->GetObjObjects();
+            OutNumChunks = ObjObjects.GetNumChunks();
+            OutNumElements = ObjObjects.GetNumElements();
+            OutChunksPtr = ObjObjects.GetObjects();
+            return true;
+        }
+        __except (GetExceptionCode() == k_ExceptionAccessViolation ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        {
+            return false;
+        }
+    }
+
+    static auto ForEachUObject_TryFillSnapshotBuffer(FUObjectItem** ChunksPtr,
+                                                       int32_t NumChunks,
+                                                       int32_t NumElements,
+                                                       int32_t ItemSize,
+                                                       ForEachUObject_SnapshotEntry* OutBuffer,
+                                                       int32_t Capacity) -> int32_t
+    {
+        int32_t Count = 0;
+        __try
+        {
+            for (int32_t ChunkIndex = 0; ChunkIndex < NumChunks; ++ChunkIndex)
+            {
+                // Clamp to NumElements -- don't walk past the populated region of the newest chunk.
+                const int32_t ChunkStartElement = ChunkIndex * TUObjectArray::NumElementsPerChunk;
+                if (ChunkStartElement >= NumElements) { break; }
+                const int32_t ElementsRemaining = NumElements - ChunkStartElement;
+                const int32_t ItemsInThisChunk =
+                        ElementsRemaining < TUObjectArray::NumElementsPerChunk ? ElementsRemaining : TUObjectArray::NumElementsPerChunk;
+
+                for (int32_t ItemIndex = 0; ItemIndex < ItemsInThisChunk; ++ItemIndex)
+                {
+                    if (Count >= Capacity) { return Count; }
+                    const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunksPtr[ChunkIndex])[ItemIndex * ItemSize]);
+                    OutBuffer[Count].Item = ObjectItem;
+                    OutBuffer[Count].ChunkIndex = ChunkIndex;
+                    OutBuffer[Count].ItemIndex = ItemIndex;
+                    ++Count;
+                }
+            }
+        }
+        __except (GetExceptionCode() == k_ExceptionAccessViolation ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        {
+            // Faulted mid-copy on the array's own structure, not a specific object -- whatever
+            // was written before the fault is used as-is.
+        }
+        return Count;
+    }
+
+    static auto ForEachUObject_TryBuildSnapshot(std::vector<ForEachUObject_SnapshotEntry>& OutSnapshot) -> void
+    {
+        int32_t NumChunks{}, NumElements{};
+        FUObjectItem** ChunksPtr{};
+        if (!ForEachUObject_TryGetChunkTableInfo(NumChunks, NumElements, ChunksPtr) || NumElements <= 0)
+        {
+            return;
+        }
+
+        static const auto ItemSize = FUObjectItem::UEP_TotalSize();
+        OutSnapshot.resize(NumElements);
+        const auto ActualCount =
+                ForEachUObject_TryFillSnapshotBuffer(ChunksPtr, NumChunks, NumElements, ItemSize, OutSnapshot.data(), (int32_t)OutSnapshot.size());
+        OutSnapshot.resize(ActualCount);
+    }
+
     static auto ForEachUObject_Chunked(const ForEachUObjectCallback& Callable) -> void
     {
         GUOBJECTARRAY_PROFILE_ITER_BEGIN()
@@ -806,31 +876,7 @@ namespace RC::Unreal::UObjectGlobals
         }
 
         std::vector<ForEachUObject_SnapshotEntry> Snapshot;
-        GUObjectArray->LockGUObjectArray();
-        {
-            const auto& ObjObjects = GUObjectArray->GetObjObjects();
-            const auto NumChunks = ObjObjects.GetNumChunks();
-            const auto NumElements = ObjObjects.GetNumElements();
-            const auto& ChunksPtr = ObjObjects.GetObjects();
-            Snapshot.reserve(NumElements);
-
-            for (int32_t ChunkIndex = 0; ChunkIndex < NumChunks; ++ChunkIndex)
-            {
-                // Clamp to NumElements -- don't walk past the populated region of the newest chunk.
-                const int32_t ChunkStartElement = ChunkIndex * TUObjectArray::NumElementsPerChunk;
-                if (ChunkStartElement >= NumElements) { break; }
-                const int32_t ElementsRemaining = NumElements - ChunkStartElement;
-                const int32_t ItemsInThisChunk =
-                        ElementsRemaining < TUObjectArray::NumElementsPerChunk ? ElementsRemaining : TUObjectArray::NumElementsPerChunk;
-
-                for (int32_t ItemIndex = 0; ItemIndex < ItemsInThisChunk; ++ItemIndex)
-                {
-                    const auto ObjectItem = std::bit_cast<FUObjectItem*>(&std::bit_cast<uint8_t*>(ChunksPtr[ChunkIndex])[ItemIndex * ItemSize]);
-                    Snapshot.emplace_back(ObjectItem, ChunkIndex, ItemIndex);
-                }
-            }
-        }
-        GUObjectArray->UnlockGUObjectArray();
+        ForEachUObject_TryBuildSnapshot(Snapshot);
 
         LoopAction Action{};
         for (const auto& Entry : Snapshot)

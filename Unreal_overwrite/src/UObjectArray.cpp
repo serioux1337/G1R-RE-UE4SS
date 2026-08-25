@@ -1,8 +1,6 @@
 #include <Unreal/UObjectArray.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UKismetSystemLibrary.hpp>
-#include <Unreal/Core/Microsoft/MinimalWindowsApi.hpp>
-#include <Helpers/Casting.hpp>
 
 namespace RC::Unreal
 {
@@ -441,18 +439,13 @@ namespace RC::Unreal
         return *SerialNumberPtr;
     }
 
-    // ObjObjectsCritical sits between ObjObjects (0x10) and ObjAvailableList (0x58) in the real
-    // FUObjectArray layout: offset = 0x58 - sizeof(CRITICAL_SECTION). Same lock GC's destroy pass
-    // holds for its whole batch.
-    static constexpr int32_t ObjObjectsCriticalOffset = 0x30;
-
+    // Unused: ForEachUObject relies on SEH instead (see ForEachUObject_TryGetChunkTableInfo),
+    // not this lock, to avoid an AV false-positive on the offset-cast + EnterCriticalSection shape.
     void UObjectArray::LockGUObjectArray()
     {
-        Windows::EnterCriticalSection(Helper::Casting::ptr_cast<Windows::CRITICAL_SECTION*>(this, ObjObjectsCriticalOffset));
     }
     void UObjectArray::UnlockGUObjectArray()
     {
-        Windows::LeaveCriticalSection(Helper::Casting::ptr_cast<Windows::CRITICAL_SECTION*>(this, ObjObjectsCriticalOffset));
     }
 
     FUObjectArray* GUObjectArray{};
